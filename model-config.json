@@ -20,6 +20,13 @@
       "authMode": "api-key",
       "envKey": "OPENROUTER_API_KEY",
       "model": "google/gemini-3-flash-preview"
+    },
+    "openrouter-free": {
+      "description": "OpenRouter — free",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "authMode": "api-key",
+      "envKey": "OPENROUTER_API_KEY",
+      "model": "openrouter/free"
     }
   }
 }

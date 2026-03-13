@@ -46,14 +46,20 @@ const MODEL_CONFIG_PATH = path.join(process.cwd(), 'model-config.json');
 
 function readModelConfig(): ModelConfig | null {
   try {
-    return JSON.parse(fs.readFileSync(MODEL_CONFIG_PATH, 'utf-8')) as ModelConfig;
+    return JSON.parse(
+      fs.readFileSync(MODEL_CONFIG_PATH, 'utf-8'),
+    ) as ModelConfig;
   } catch {
     return null;
   }
 }
 
 function writeModelConfig(config: ModelConfig): void {
-  fs.writeFileSync(MODEL_CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  fs.writeFileSync(
+    MODEL_CONFIG_PATH,
+    JSON.stringify(config, null, 2) + '\n',
+    'utf-8',
+  );
 }
 
 function resolveCredentials(): {
@@ -92,7 +98,8 @@ function resolveCredentials(): {
       return {
         upstreamUrl: resolvedUrl,
         authMode: 'oauth',
-        oauthToken: secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN,
+        oauthToken:
+          secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN,
         modelOverride: activeModel.model,
       };
     }
@@ -101,7 +108,9 @@ function resolveCredentials(): {
   // Fallback: original behaviour (reads ANTHROPIC_BASE_URL from .env)
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
   return {
-    upstreamUrl: new URL(secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com'),
+    upstreamUrl: new URL(
+      secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
+    ),
     authMode,
     apiKey: secrets.ANTHROPIC_API_KEY,
     oauthToken: secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN,
@@ -114,7 +123,10 @@ export function startCredentialProxy(
 ): Promise<Server> {
   // Log the starting model
   const initialConfig = readModelConfig();
-  logger.info({ model: initialConfig?.active ?? 'claude (fallback)' }, 'Credential proxy model');
+  logger.info(
+    { model: initialConfig?.active ?? 'claude (fallback)' },
+    'Credential proxy model',
+  );
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
@@ -124,7 +136,9 @@ export function startCredentialProxy(
         req.on('data', (c) => chunks.push(c));
         req.on('end', () => {
           try {
-            const body = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as { model?: string };
+            const body = JSON.parse(
+              Buffer.concat(chunks).toString('utf-8'),
+            ) as { model?: string };
             const modelConfig = readModelConfig();
 
             if (!modelConfig) {
@@ -137,7 +151,11 @@ export function startCredentialProxy(
             if (!requested || !modelConfig.models[requested]) {
               const available = Object.keys(modelConfig.models);
               res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: `Unknown model. Available: ${available.join(', ')}` }));
+              res.end(
+                JSON.stringify({
+                  error: `Unknown model. Available: ${available.join(', ')}`,
+                }),
+              );
               return;
             }
 
@@ -147,12 +165,14 @@ export function startCredentialProxy(
 
             logger.info({ from: previous, to: requested }, 'Model switched');
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-              ok: true,
-              previous,
-              active: requested,
-              description: modelConfig.models[requested].description,
-            }));
+            res.end(
+              JSON.stringify({
+                ok: true,
+                previous,
+                active: requested,
+                description: modelConfig.models[requested].description,
+              }),
+            );
           } catch (err) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Invalid JSON body' }));
@@ -167,14 +187,18 @@ export function startCredentialProxy(
         const active = modelConfig?.active ?? 'unknown';
         const model = modelConfig?.models[active];
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          active,
-          description: model?.description ?? 'unknown',
-          available: modelConfig ? Object.entries(modelConfig.models).map(([k, v]) => ({
-            id: k,
-            description: v.description,
-          })) : [],
-        }));
+        res.end(
+          JSON.stringify({
+            active,
+            description: model?.description ?? 'unknown',
+            available: modelConfig
+              ? Object.entries(modelConfig.models).map(([k, v]) => ({
+                  id: k,
+                  description: v.description,
+                }))
+              : [],
+          }),
+        );
         return;
       }
 
@@ -185,7 +209,8 @@ export function startCredentialProxy(
         let body = Buffer.concat(chunks);
 
         // Resolve credentials fresh on every request (hot-reload)
-        const { upstreamUrl, authMode, apiKey, oauthToken, modelOverride } = resolveCredentials();
+        const { upstreamUrl, authMode, apiKey, oauthToken, modelOverride } =
+          resolveCredentials();
         const isHttps = upstreamUrl.protocol === 'https:';
         const makeRequest = isHttps ? httpsRequest : httpRequest;
 
@@ -196,7 +221,10 @@ export function startCredentialProxy(
           const ct = (req.headers['content-type'] ?? '') as string;
           if (ct.includes('application/json')) {
             try {
-              const parsed = JSON.parse(body.toString('utf-8')) as Record<string, unknown>;
+              const parsed = JSON.parse(body.toString('utf-8')) as Record<
+                string,
+                unknown
+              >;
               if ('model' in parsed) {
                 parsed['model'] = modelOverride;
                 body = Buffer.from(JSON.stringify(parsed), 'utf-8');
@@ -207,11 +235,12 @@ export function startCredentialProxy(
           }
         }
 
-        const headers: Record<string, string | number | string[] | undefined> = {
-          ...(req.headers as Record<string, string>),
-          host: upstreamUrl.host,
-          'content-length': body.length,
-        };
+        const headers: Record<string, string | number | string[] | undefined> =
+          {
+            ...(req.headers as Record<string, string>),
+            host: upstreamUrl.host,
+            'content-length': body.length,
+          };
 
         // Strip hop-by-hop headers that must not be forwarded by proxies
         delete headers['connection'];

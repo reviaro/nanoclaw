@@ -7,12 +7,35 @@ import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts, SessionStatus } from './registry.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
 import {
   Channel,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+
+/** Download a file from Telegram's CDN to a local path. */
+async function downloadTelegramFile(
+  botToken: string,
+  filePath: string,
+  destPath: string,
+): Promise<void> {
+  const url = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath);
+    https
+      .get(url, (res) => {
+        res.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          resolve();
+        });
+        file.on('error', reject);
+      })
+      .on('error', reject);
+  });
+}
 
 export type TelegramChannelOpts = ChannelOpts;
 
@@ -82,13 +105,13 @@ export class TelegramChannel implements Channel {
     this.bot.command('help', (ctx) => {
       ctx.reply(
         `*${ASSISTANT_NAME} commands*\n\n` +
-        `/ping — check bot is online\n` +
-        `/status — session info and active model\n` +
-        `/models — view and switch AI model\n` +
-        `/new — start a fresh session\n` +
-        `/reset — same as /new\n` +
-        `/compact — compress context to save tokens\n` +
-        `/chatid — show this chat's registration ID`,
+          `/ping — check bot is online\n` +
+          `/status — session info and active model\n` +
+          `/models — view and switch AI model\n` +
+          `/new — start a fresh session\n` +
+          `/reset — same as /new\n` +
+          `/compact — compress context to save tokens\n` +
+          `/chatid — show this chat's registration ID`,
         { parse_mode: 'Markdown' },
       );
     });
@@ -112,10 +135,10 @@ export class TelegramChannel implements Channel {
 
       ctx.reply(
         `*${ASSISTANT_NAME} status*\n\n` +
-        `Model: \`${status.model}\`\n` +
-        `Session: ${status.hasSession ? '✓ active' : '○ none'}\n` +
-        `Uptime: ${uptimeStr}\n` +
-        `Group: ${status.groupName}`,
+          `Model: \`${status.model}\`\n` +
+          `Session: ${status.hasSession ? '✓ active' : '○ none'}\n` +
+          `Uptime: ${uptimeStr}\n` +
+          `Group: ${status.groupName}`,
         { parse_mode: 'Markdown' },
       );
     });
@@ -138,7 +161,7 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
       if (this.opts.onCompact) {
         this.opts.onCompact(chatJid);
-        ctx.reply('Compacting context… I\'ll let you know when done.');
+        ctx.reply("Compacting context… I'll let you know when done.");
       } else {
         ctx.reply('Compact not available.');
       }
@@ -147,7 +170,10 @@ export class TelegramChannel implements Channel {
     // /models — view and switch AI model
     this.bot.command('models', (ctx) => {
       const configPath = path.join(process.cwd(), 'model-config.json');
-      let config: { active: string; models: Record<string, { description: string }> };
+      let config: {
+        active: string;
+        models: Record<string, { description: string }>;
+      };
       try {
         config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       } catch {
@@ -157,14 +183,18 @@ export class TelegramChannel implements Channel {
 
       const keyboard = new InlineKeyboard();
       for (const [id, model] of Object.entries(config.models)) {
-        const label = id === config.active ? `✓ ${model.description}` : model.description;
+        const label =
+          id === config.active ? `✓ ${model.description}` : model.description;
         keyboard.text(label, `model:${id}`).row();
       }
 
-      ctx.reply(`*Current model:* ${config.models[config.active]?.description ?? config.active}\n\nSelect a model:`, {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard,
-      });
+      ctx.reply(
+        `*Current model:* ${config.models[config.active]?.description ?? config.active}\n\nSelect a model:`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard,
+        },
+      );
     });
 
     // Handle model selection button press
@@ -174,7 +204,10 @@ export class TelegramChannel implements Channel {
 
       const chosen = data.slice('model:'.length);
       const configPath = path.join(process.cwd(), 'model-config.json');
-      let config: { active: string; models: Record<string, { description: string }> };
+      let config: {
+        active: string;
+        models: Record<string, { description: string }>;
+      };
       try {
         config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       } catch {
@@ -189,7 +222,11 @@ export class TelegramChannel implements Channel {
 
       const previous = config.active;
       config.active = chosen;
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify(config, null, 2) + '\n',
+        'utf-8',
+      );
 
       const description = config.models[chosen].description;
       await ctx.answerCallbackQuery({ text: `Switched to ${description}` });
@@ -197,7 +234,8 @@ export class TelegramChannel implements Channel {
       // Update the original message to reflect the new active model
       const keyboard = new InlineKeyboard();
       for (const [id, model] of Object.entries(config.models)) {
-        const label = id === chosen ? `✓ ${model.description}` : model.description;
+        const label =
+          id === chosen ? `✓ ${model.description}` : model.description;
         keyboard.text(label, `model:${id}`).row();
       }
       await ctx.editMessageText(
@@ -205,7 +243,10 @@ export class TelegramChannel implements Channel {
         { parse_mode: 'Markdown', reply_markup: keyboard },
       );
 
-      logger.info({ from: previous, to: chosen }, 'Model switched via Telegram /models');
+      logger.info(
+        { from: previous, to: chosen },
+        'Model switched via Telegram /models',
+      );
     });
 
     this.bot.on('message:text', async (ctx) => {
@@ -323,7 +364,67 @@ export class TelegramChannel implements Channel {
 
     this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
+    this.bot.on('message:voice', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      const msgId = ctx.message.message_id.toString();
+      const fileId = ctx.message.voice.file_id;
+      let content = '[Voice message - download failed]';
+
+      try {
+        const fileInfo = await this.bot!.api.getFile(fileId);
+        if (fileInfo.file_path) {
+          const groupDir = resolveGroupFolderPath(group.folder);
+          const filename = `voice-${msgId}.ogg`;
+          const hostPath = path.join(groupDir, filename);
+          const containerPath = `/workspace/group/${filename}`;
+          await downloadTelegramFile(
+            this.botToken,
+            fileInfo.file_path,
+            hostPath,
+          );
+          content = `[Voice: ${containerPath}]`;
+          logger.info(
+            { chatJid, filename, containerPath },
+            'Telegram voice message downloaded',
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          { err, fileId },
+          'Failed to download Telegram voice message',
+        );
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: msgId,
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+    });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
     this.bot.on('message:document', (ctx) => {
       const name = ctx.message.document?.file_name || 'file';

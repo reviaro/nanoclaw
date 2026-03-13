@@ -544,7 +544,10 @@ async function main(): Promise<void> {
         is_from_me: false,
         is_bot_message: false,
       });
-      logger.info({ chatJid, group: group.name }, 'Compact triggered via command');
+      logger.info(
+        { chatJid, group: group.name },
+        'Compact triggered via command',
+      );
     },
 
     onGetStatus: (chatJid: string) => {
@@ -553,10 +556,15 @@ async function main(): Promise<void> {
       let model = 'claude';
       try {
         const cfg = JSON.parse(
-          fs.readFileSync(path.join(process.cwd(), 'model-config.json'), 'utf-8'),
+          fs.readFileSync(
+            path.join(process.cwd(), 'model-config.json'),
+            'utf-8',
+          ),
         ) as { active: string };
         model = cfg.active;
-      } catch { /* use default */ }
+      } catch {
+        /* use default */
+      }
       return {
         hasSession: !!sessions[group.folder],
         model,
