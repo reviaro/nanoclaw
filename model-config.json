@@ -1,0 +1,25 @@
+{
+  "active": "claude",
+  "models": {
+    "claude": {
+      "description": "Claude (Anthropic — current subscription)",
+      "baseUrl": "https://api.anthropic.com",
+      "authMode": "oauth",
+      "envKey": "CLAUDE_CODE_OAUTH_TOKEN"
+    },
+    "minimax": {
+      "description": "MiniMax M2.5 (200k context, cheaper)",
+      "baseUrl": "https://api.minimax.io/anthropic",
+      "authMode": "api-key",
+      "envKey": "MINIMAX_API_KEY",
+      "model": "MiniMax-M2.5"
+    },
+    "openrouter": {
+      "description": "OpenRouter — Gemini 3 Flash free (1M context)",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "authMode": "api-key",
+      "envKey": "OPENROUTER_API_KEY",
+      "model": "google/gemini-3-flash-preview"
+    }
+  }
+}

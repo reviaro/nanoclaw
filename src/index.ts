@@ -29,6 +29,7 @@ import {
 import {
   getAllChats,
   getAllRegisteredGroups,
+  clearSession,
   getAllSessions,
   getAllTasks,
   getMessagesSince,
@@ -55,6 +56,7 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { fetchAndWriteContext } from './openviking.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -294,6 +296,9 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
+  // Fetch relevant context from OpenViking (non-blocking on failure)
+  await fetchAndWriteContext(group.folder, prompt);
+
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
@@ -517,6 +522,48 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+
+    onResetSession: (chatJid: string) => {
+      const group = registeredGroups[chatJid];
+      if (!group) return;
+      delete sessions[group.folder];
+      clearSession(group.folder);
+      logger.info({ chatJid, group: group.name }, 'Session reset via command');
+    },
+
+    onCompact: (chatJid: string) => {
+      const group = registeredGroups[chatJid];
+      if (!group) return;
+      storeMessage({
+        id: `compact-${Date.now()}`,
+        chat_jid: chatJid,
+        sender: 'system',
+        sender_name: 'System',
+        content: '/compact',
+        timestamp: new Date().toISOString(),
+        is_from_me: false,
+        is_bot_message: false,
+      });
+      logger.info({ chatJid, group: group.name }, 'Compact triggered via command');
+    },
+
+    onGetStatus: (chatJid: string) => {
+      const group = registeredGroups[chatJid];
+      if (!group) return null;
+      let model = 'claude';
+      try {
+        const cfg = JSON.parse(
+          fs.readFileSync(path.join(process.cwd(), 'model-config.json'), 'utf-8'),
+        ) as { active: string };
+        model = cfg.active;
+      } catch { /* use default */ }
+      return {
+        hasSession: !!sessions[group.folder],
+        model,
+        uptimeSeconds: Math.floor(process.uptime()),
+        groupName: group.name,
+      };
+    },
   };
 
   // Create and connect all registered channels.

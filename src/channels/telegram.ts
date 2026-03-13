@@ -1,10 +1,12 @@
 import https from 'https';
-import { Api, Bot } from 'grammy';
+import fs from 'fs';
+import path from 'path';
+import { Api, Bot, InlineKeyboard } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
-import { registerChannel, ChannelOpts } from './registry.js';
+import { registerChannel, ChannelOpts, SessionStatus } from './registry.js';
 import {
   Channel,
   OnChatMetadata,
@@ -12,11 +14,7 @@ import {
   RegisteredGroup,
 } from '../types.js';
 
-export interface TelegramChannelOpts {
-  onMessage: OnInboundMessage;
-  onChatMetadata: OnChatMetadata;
-  registeredGroups: () => Record<string, RegisteredGroup>;
-}
+export type TelegramChannelOpts = ChannelOpts;
 
 /**
  * Send a message with Telegram Markdown parse mode, falling back to plain text.
@@ -78,6 +76,136 @@ export class TelegramChannel implements Channel {
     // Command to check bot status
     this.bot.command('ping', (ctx) => {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
+    });
+
+    // /help — list all available commands
+    this.bot.command('help', (ctx) => {
+      ctx.reply(
+        `*${ASSISTANT_NAME} commands*\n\n` +
+        `/ping — check bot is online\n` +
+        `/status — session info and active model\n` +
+        `/models — view and switch AI model\n` +
+        `/new — start a fresh session\n` +
+        `/reset — same as /new\n` +
+        `/compact — compress context to save tokens\n` +
+        `/chatid — show this chat's registration ID`,
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    // /status — show session, model, uptime
+    this.bot.command('status', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const status: SessionStatus | null = this.opts.onGetStatus
+        ? this.opts.onGetStatus(chatJid)
+        : null;
+
+      if (!status) {
+        ctx.reply('This chat is not registered.');
+        return;
+      }
+
+      const uptime = status.uptimeSeconds;
+      const h = Math.floor(uptime / 3600);
+      const m = Math.floor((uptime % 3600) / 60);
+      const uptimeStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
+
+      ctx.reply(
+        `*${ASSISTANT_NAME} status*\n\n` +
+        `Model: \`${status.model}\`\n` +
+        `Session: ${status.hasSession ? '✓ active' : '○ none'}\n` +
+        `Uptime: ${uptimeStr}\n` +
+        `Group: ${status.groupName}`,
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    // /new and /reset — clear the current session
+    const handleReset = (ctx: any) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (this.opts.onResetSession) {
+        this.opts.onResetSession(chatJid);
+        ctx.reply('Session cleared. Next message starts a fresh conversation.');
+      } else {
+        ctx.reply('Reset not available.');
+      }
+    };
+    this.bot.command('new', handleReset);
+    this.bot.command('reset', handleReset);
+
+    // /compact — compress context to save tokens
+    this.bot.command('compact', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (this.opts.onCompact) {
+        this.opts.onCompact(chatJid);
+        ctx.reply('Compacting context… I\'ll let you know when done.');
+      } else {
+        ctx.reply('Compact not available.');
+      }
+    });
+
+    // /models — view and switch AI model
+    this.bot.command('models', (ctx) => {
+      const configPath = path.join(process.cwd(), 'model-config.json');
+      let config: { active: string; models: Record<string, { description: string }> };
+      try {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      } catch {
+        ctx.reply('Could not read model-config.json');
+        return;
+      }
+
+      const keyboard = new InlineKeyboard();
+      for (const [id, model] of Object.entries(config.models)) {
+        const label = id === config.active ? `✓ ${model.description}` : model.description;
+        keyboard.text(label, `model:${id}`).row();
+      }
+
+      ctx.reply(`*Current model:* ${config.models[config.active]?.description ?? config.active}\n\nSelect a model:`, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      });
+    });
+
+    // Handle model selection button press
+    this.bot.on('callback_query:data', async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      if (!data.startsWith('model:')) return;
+
+      const chosen = data.slice('model:'.length);
+      const configPath = path.join(process.cwd(), 'model-config.json');
+      let config: { active: string; models: Record<string, { description: string }> };
+      try {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      } catch {
+        await ctx.answerCallbackQuery({ text: 'Error reading config' });
+        return;
+      }
+
+      if (!config.models[chosen]) {
+        await ctx.answerCallbackQuery({ text: 'Unknown model' });
+        return;
+      }
+
+      const previous = config.active;
+      config.active = chosen;
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+
+      const description = config.models[chosen].description;
+      await ctx.answerCallbackQuery({ text: `Switched to ${description}` });
+
+      // Update the original message to reflect the new active model
+      const keyboard = new InlineKeyboard();
+      for (const [id, model] of Object.entries(config.models)) {
+        const label = id === chosen ? `✓ ${model.description}` : model.description;
+        keyboard.text(label, `model:${id}`).row();
+      }
+      await ctx.editMessageText(
+        `*Current model:* ${description}\n\nSelect a model:`,
+        { parse_mode: 'Markdown', reply_markup: keyboard },
+      );
+
+      logger.info({ from: previous, to: chosen }, 'Model switched via Telegram /models');
     });
 
     this.bot.on('message:text', async (ctx) => {

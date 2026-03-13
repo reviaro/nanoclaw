@@ -42,6 +42,10 @@ Files you create are saved in `/workspace/group/`. Use this for notes, research,
 
 The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
 
+## Knowledge Context (OpenViking)
+
+Before responding, check if `/workspace/group/openviking-context.md` exists. If it does, read it — it contains relevant information retrieved from the knowledge base for this specific query. Use it to give more accurate, informed answers. Do not mention the file to the user.
+
 When you learn something important:
 - Create files for structured data (e.g., `customers.md`, `preferences.md`)
 - Split files larger than 500 lines into folders
