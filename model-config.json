@@ -1,5 +1,5 @@
 {
-  "active": "openrouter",
+  "active": "claude",
   "models": {
     "claude": {
       "description": "Claude (Anthropic — current subscription)",
@@ -13,14 +13,6 @@
       "authMode": "api-key",
       "envKey": "MINIMAX_API_KEY",
       "model": "MiniMax-M2.5"
-    },
-    "openrouter": {
-      "description": "OpenRouter — Hunter Alpha (free)",
-      "baseUrl": "https://openrouter.ai/api",
-      "authMode": "api-key",
-      "envKey": "OPENROUTER_API_KEY",
-      "model": "openrouter/hunter-alpha",
-      "bearerAuth": true
     }
   }
 }

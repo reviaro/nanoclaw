@@ -221,9 +221,7 @@ export function startCredentialProxy(
           req.resume();
           req.on('end', () => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(
-              JSON.stringify({ api_key: 'proxy-managed-do-not-use' }),
-            );
+            res.end(JSON.stringify({ api_key: 'proxy-managed-do-not-use' }));
           });
           return;
         }
@@ -302,7 +300,10 @@ export function startCredentialProxy(
       }
 
       // ── Proxy all other requests to the upstream API ───────────────────────
-      logger.debug({ method: req.method, url: req.url }, 'Proxy request received');
+      logger.debug(
+        { method: req.method, url: req.url },
+        'Proxy request received',
+      );
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
@@ -342,6 +343,25 @@ export function startCredentialProxy(
                 delete parsed['stream'];
                 stripStream = true;
               }
+              // Strip thinking/redacted_thinking blocks from message history
+              // when forwarding to Claude (oauth mode). These blocks may have
+              // been produced by a different provider with invalid signatures
+              // and will cause a 400 error from the Anthropic API.
+              if (!bearerAuth && Array.isArray(parsed['messages'])) {
+                parsed['messages'] = (
+                  parsed['messages'] as Array<Record<string, unknown>>
+                ).map((msg) => {
+                  if (!Array.isArray(msg['content'])) return msg;
+                  const filtered = (
+                    msg['content'] as Array<Record<string, unknown>>
+                  ).filter(
+                    (block) =>
+                      block['type'] !== 'thinking' &&
+                      block['type'] !== 'redacted_thinking',
+                  );
+                  return { ...msg, content: filtered };
+                });
+              }
               body = Buffer.from(JSON.stringify(parsed), 'utf-8');
             } catch {
               // Not valid JSON — forward as-is
@@ -355,7 +375,9 @@ export function startCredentialProxy(
             host: upstreamUrl.host,
             'content-length': body.length,
             // If we stripped stream, accept JSON instead of SSE
-            accept: stripStream ? 'application/json' : (req.headers['accept'] as string | undefined) ?? '*/*',
+            accept: stripStream
+              ? 'application/json'
+              : ((req.headers['accept'] as string | undefined) ?? '*/*'),
           };
 
         // Strip hop-by-hop headers that must not be forwarded by proxies
@@ -373,7 +395,15 @@ export function startCredentialProxy(
             headers['x-api-key'] = apiKey;
           }
         } else {
-          if (headers['authorization']) {
+          // OAuth mode: replace authorization header with real token.
+          // Also handle containers started in api-key mode that switched to oauth
+          // mid-session — they send x-api-key: placeholder instead of authorization.
+          if (headers['x-api-key'] === 'placeholder') {
+            delete headers['x-api-key'];
+            if (oauthToken) {
+              headers['authorization'] = `Bearer ${oauthToken}`;
+            }
+          } else if (headers['authorization']) {
             delete headers['authorization'];
             if (oauthToken) {
               headers['authorization'] = `Bearer ${oauthToken}`;
@@ -408,39 +438,45 @@ export function startCredentialProxy(
               const raw = Buffer.concat(respChunks);
               const encoding = upRes.headers['content-encoding'] ?? '';
               const decode = (buf: Buffer, cb: (s: string) => void) => {
-                if (encoding === 'gzip' || encoding === 'br' || buf[0] === 0x1f) {
-                  gunzip(buf, (err, result) => cb(err ? buf.toString('utf-8') : result.toString('utf-8')));
+                if (
+                  encoding === 'gzip' ||
+                  encoding === 'br' ||
+                  buf[0] === 0x1f
+                ) {
+                  gunzip(buf, (err, result) =>
+                    cb(err ? buf.toString('utf-8') : result.toString('utf-8')),
+                  );
                 } else {
                   cb(buf.toString('utf-8'));
                 }
               };
               decode(raw, (text) => {
-              try {
-                const json = JSON.parse(text) as Record<string, unknown>;
+                try {
+                  const json = JSON.parse(text) as Record<string, unknown>;
 
-                if (upRes.statusCode !== 200 || json['error']) {
-                  // Pass errors through as-is
-                  res.writeHead(upRes.statusCode!, {
-                    'content-type': 'application/json',
+                  if (upRes.statusCode !== 200 || json['error']) {
+                    // Pass errors through as-is
+                    res.writeHead(upRes.statusCode!, {
+                      'content-type': 'application/json',
+                    });
+                    res.end(JSON.stringify(json));
+                    return;
+                  }
+
+                  const sse = anthropicJsonToSSE(json);
+                  res.writeHead(200, {
+                    'content-type': 'text/event-stream',
+                    'cache-control': 'no-cache',
+                    connection: 'keep-alive',
                   });
-                  res.end(JSON.stringify(json));
-                  return;
+                  res.end(sse);
+                } catch (err) {
+                  logger.error({ err }, 'Failed to convert response to SSE');
+                  if (!res.headersSent) {
+                    res.writeHead(502);
+                    res.end('Bad Gateway');
+                  }
                 }
-
-                const sse = anthropicJsonToSSE(json);
-                res.writeHead(200, {
-                  'content-type': 'text/event-stream',
-                  'cache-control': 'no-cache',
-                  connection: 'keep-alive',
-                });
-                res.end(sse);
-              } catch (err) {
-                logger.error({ err }, 'Failed to convert response to SSE');
-                if (!res.headersSent) {
-                  res.writeHead(502);
-                  res.end('Bad Gateway');
-                }
-              }
               }); // decode callback
             });
           },

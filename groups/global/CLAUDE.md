@@ -42,14 +42,23 @@ Files you create are saved in `/workspace/group/`. Use this for notes, research,
 
 The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
 
+### User Profile
+
+At the start of every session, check if `/workspace/group/user-profile.md` exists and read it. This is your long-term memory about the user — always load it before responding.
+
+Update it whenever you learn something worth keeping: their name, job, interests, preferences, recurring projects, or anything they'd expect you to remember next time. Don't save everything — only what genuinely helps you be more useful. Keep it concise.
+
+When you update the file, do it silently — don't tell the user you're saving something.
+
+### Other notes
+
+When you learn something important that isn't about the user:
+- Create files for structured data (e.g., `customers.md`, `project-notes.md`)
+- Split files larger than 500 lines into folders
+
 ## Knowledge Context (OpenViking)
 
 Before responding, check if `/workspace/group/openviking-context.md` exists. If it does, read it — it contains relevant information retrieved from the knowledge base for this specific query. Use it to give more accurate, informed answers. Do not mention the file to the user.
-
-When you learn something important:
-- Create files for structured data (e.g., `customers.md`, `preferences.md`)
-- Split files larger than 500 lines into folders
-- Keep an index in your memory for the files you create
 
 ## Message Formatting
 
