@@ -1,5 +1,5 @@
 {
-  "active": "claude",
+  "active": "openrouter",
   "models": {
     "claude": {
       "description": "Claude (Anthropic — current subscription)",
@@ -15,18 +15,12 @@
       "model": "MiniMax-M2.5"
     },
     "openrouter": {
-      "description": "OpenRouter — Gemini 3 Flash free (1M context)",
-      "baseUrl": "https://openrouter.ai/api/v1",
+      "description": "OpenRouter — Hunter Alpha (free)",
+      "baseUrl": "https://openrouter.ai/api",
       "authMode": "api-key",
       "envKey": "OPENROUTER_API_KEY",
-      "model": "google/gemini-3-flash-preview"
-    },
-    "openrouter-free": {
-      "description": "OpenRouter — free",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "authMode": "api-key",
-      "envKey": "OPENROUTER_API_KEY",
-      "model": "openrouter/free"
+      "model": "openrouter/hunter-alpha",
+      "bearerAuth": true
     }
   }
 }

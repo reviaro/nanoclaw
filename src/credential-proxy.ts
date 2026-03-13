@@ -17,6 +17,7 @@
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
+import { gunzip } from 'zlib';
 import fs from 'fs';
 import path from 'path';
 
@@ -35,6 +36,7 @@ interface ModelEntry {
   authMode: AuthMode;
   envKey: string;
   model?: string; // If set, overrides the model field in proxied request bodies
+  bearerAuth?: boolean; // If true, use Authorization: Bearer <key> instead of x-api-key
 }
 
 interface ModelConfig {
@@ -68,6 +70,7 @@ function resolveCredentials(): {
   apiKey?: string;
   oauthToken?: string;
   modelOverride?: string;
+  bearerAuth?: boolean;
 } {
   const modelConfig = readModelConfig();
   const activeKey = modelConfig?.active ?? 'claude';
@@ -80,6 +83,7 @@ function resolveCredentials(): {
     'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
     'MINIMAX_API_KEY',
+    'OPENROUTER_API_KEY',
   ]);
 
   // If model-config.json is present and has a valid active model, use it
@@ -93,6 +97,7 @@ function resolveCredentials(): {
         authMode: 'api-key',
         apiKey: resolvedApiKey,
         modelOverride: activeModel.model,
+        bearerAuth: activeModel.bearerAuth,
       };
     } else {
       return {
@@ -117,6 +122,78 @@ function resolveCredentials(): {
   };
 }
 
+/**
+ * Convert a buffered Anthropic-format JSON response to properly-ordered SSE.
+ * Used for bearerAuth providers (e.g. OpenRouter) whose streaming SSE can
+ * have interleaved content blocks that confuse the Claude Code SDK.
+ */
+function anthropicJsonToSSE(json: Record<string, unknown>): string {
+  const lines: string[] = [];
+  const emit = (event: string, data: unknown) => {
+    lines.push(`event: ${event}`);
+    lines.push(`data: ${JSON.stringify(data)}`);
+    lines.push('');
+  };
+
+  const usage = (json['usage'] as Record<string, unknown> | undefined) ?? {};
+  emit('message_start', {
+    type: 'message_start',
+    message: {
+      id: json['id'] ?? '',
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      model: json['model'] ?? '',
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: usage['input_tokens'] ?? 0, output_tokens: 0 },
+    },
+  });
+
+  const contents = (json['content'] as Array<Record<string, unknown>>) ?? [];
+  contents.forEach((block, index) => {
+    const type = block['type'] as string;
+    if (type === 'text') {
+      emit('content_block_start', {
+        type: 'content_block_start',
+        index,
+        content_block: { type: 'text', text: '' },
+      });
+      emit('content_block_delta', {
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'text_delta', text: block['text'] ?? '' },
+      });
+      emit('content_block_stop', { type: 'content_block_stop', index });
+    } else if (type === 'thinking') {
+      emit('content_block_start', {
+        type: 'content_block_start',
+        index,
+        content_block: { type: 'thinking', thinking: '' },
+      });
+      emit('content_block_delta', {
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'thinking_delta', thinking: block['thinking'] ?? '' },
+      });
+      emit('content_block_stop', { type: 'content_block_stop', index });
+    }
+    // redacted_thinking and other non-standard types are skipped
+  });
+
+  emit('message_delta', {
+    type: 'message_delta',
+    delta: {
+      stop_reason: json['stop_reason'] ?? 'end_turn',
+      stop_sequence: null,
+    },
+    usage: { output_tokens: usage['output_tokens'] ?? 0 },
+  });
+  emit('message_stop', { type: 'message_stop' });
+
+  return lines.join('\n') + '\n';
+}
+
 export function startCredentialProxy(
   port: number,
   host = '127.0.0.1',
@@ -130,6 +207,28 @@ export function startCredentialProxy(
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
+      // ── OAuth token exchange for api-key providers ─────────────────────────
+      // Claude Code always does an OAuth exchange first. For non-Anthropic
+      // api-key providers the exchange URL doesn't exist, so we return a
+      // synthetic response so Claude Code can proceed to /v1/messages.
+      if (
+        req.method === 'POST' &&
+        req.url === '/api/oauth/claude_cli/create_api_key'
+      ) {
+        const { authMode } = resolveCredentials();
+        if (authMode === 'api-key') {
+          // Drain request body then return a fake API key
+          req.resume();
+          req.on('end', () => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({ api_key: 'proxy-managed-do-not-use' }),
+            );
+          });
+          return;
+        }
+      }
+
       // ── Model switch endpoint ──────────────────────────────────────────────
       if (req.method === 'POST' && req.url === '/model-switch') {
         const chunks: Buffer[] = [];
@@ -203,21 +302,32 @@ export function startCredentialProxy(
       }
 
       // ── Proxy all other requests to the upstream API ───────────────────────
+      logger.debug({ method: req.method, url: req.url }, 'Proxy request received');
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
         let body = Buffer.concat(chunks);
 
         // Resolve credentials fresh on every request (hot-reload)
-        const { upstreamUrl, authMode, apiKey, oauthToken, modelOverride } =
-          resolveCredentials();
+        const {
+          upstreamUrl,
+          authMode,
+          apiKey,
+          oauthToken,
+          modelOverride,
+          bearerAuth,
+        } = resolveCredentials();
         const isHttps = upstreamUrl.protocol === 'https:';
         const makeRequest = isHttps ? httpsRequest : httpRequest;
 
         // Rewrite model field in request body if the active model specifies an override.
         // Claude Code always sends a Claude model name; non-Anthropic providers need
-        // their own model ID (e.g. OpenRouter's "google/gemini-3-flash-preview").
-        if (modelOverride && req.method === 'POST' && body.length > 0) {
+        // their own model ID (e.g. OpenRouter's "openrouter/hunter-alpha").
+        // For bearerAuth providers, also strip `stream: true` — their streaming SSE
+        // format can be non-compliant (interleaved content blocks). We buffer the
+        // JSON response and re-emit it as properly-ordered Anthropic SSE instead.
+        let stripStream = false;
+        if (req.method === 'POST' && body.length > 0) {
           const ct = (req.headers['content-type'] ?? '') as string;
           if (ct.includes('application/json')) {
             try {
@@ -225,10 +335,14 @@ export function startCredentialProxy(
                 string,
                 unknown
               >;
-              if ('model' in parsed) {
+              if (modelOverride && 'model' in parsed) {
                 parsed['model'] = modelOverride;
-                body = Buffer.from(JSON.stringify(parsed), 'utf-8');
               }
+              if (bearerAuth && parsed['stream'] === true) {
+                delete parsed['stream'];
+                stripStream = true;
+              }
+              body = Buffer.from(JSON.stringify(parsed), 'utf-8');
             } catch {
               // Not valid JSON — forward as-is
             }
@@ -240,6 +354,8 @@ export function startCredentialProxy(
             ...(req.headers as Record<string, string>),
             host: upstreamUrl.host,
             'content-length': body.length,
+            // If we stripped stream, accept JSON instead of SSE
+            accept: stripStream ? 'application/json' : (req.headers['accept'] as string | undefined) ?? '*/*',
           };
 
         // Strip hop-by-hop headers that must not be forwarded by proxies
@@ -248,8 +364,14 @@ export function startCredentialProxy(
         delete headers['transfer-encoding'];
 
         if (authMode === 'api-key') {
+          // Always strip both auth headers first to avoid sending container's placeholder
           delete headers['x-api-key'];
-          headers['x-api-key'] = apiKey;
+          delete headers['authorization'];
+          if (bearerAuth) {
+            headers['authorization'] = `Bearer ${apiKey}`;
+          } else {
+            headers['x-api-key'] = apiKey;
+          }
         } else {
           if (headers['authorization']) {
             delete headers['authorization'];
@@ -259,17 +381,68 @@ export function startCredentialProxy(
           }
         }
 
+        // Prepend the upstream base path (e.g. "/anthropic" for MiniMax,
+        // "/api" for OpenRouter) to the incoming request path.
+        const basePathPrefix = upstreamUrl.pathname.replace(/\/$/, '');
+        const forwardPath = basePathPrefix + (req.url || '/');
+
         const upstream = makeRequest(
           {
             hostname: upstreamUrl.hostname,
             port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
+            path: forwardPath,
             method: req.method,
             headers,
           } as RequestOptions,
           (upRes) => {
-            res.writeHead(upRes.statusCode!, upRes.headers);
-            upRes.pipe(res);
+            if (!stripStream) {
+              res.writeHead(upRes.statusCode!, upRes.headers);
+              upRes.pipe(res);
+              return;
+            }
+
+            // Buffer the JSON response and re-emit as Anthropic-compliant SSE
+            const respChunks: Buffer[] = [];
+            upRes.on('data', (c: Buffer) => respChunks.push(c));
+            upRes.on('end', () => {
+              const raw = Buffer.concat(respChunks);
+              const encoding = upRes.headers['content-encoding'] ?? '';
+              const decode = (buf: Buffer, cb: (s: string) => void) => {
+                if (encoding === 'gzip' || encoding === 'br' || buf[0] === 0x1f) {
+                  gunzip(buf, (err, result) => cb(err ? buf.toString('utf-8') : result.toString('utf-8')));
+                } else {
+                  cb(buf.toString('utf-8'));
+                }
+              };
+              decode(raw, (text) => {
+              try {
+                const json = JSON.parse(text) as Record<string, unknown>;
+
+                if (upRes.statusCode !== 200 || json['error']) {
+                  // Pass errors through as-is
+                  res.writeHead(upRes.statusCode!, {
+                    'content-type': 'application/json',
+                  });
+                  res.end(JSON.stringify(json));
+                  return;
+                }
+
+                const sse = anthropicJsonToSSE(json);
+                res.writeHead(200, {
+                  'content-type': 'text/event-stream',
+                  'cache-control': 'no-cache',
+                  connection: 'keep-alive',
+                });
+                res.end(sse);
+              } catch (err) {
+                logger.error({ err }, 'Failed to convert response to SSE');
+                if (!res.headersSent) {
+                  res.writeHead(502);
+                  res.end('Bad Gateway');
+                }
+              }
+              }); // decode callback
+            });
           },
         );
 
